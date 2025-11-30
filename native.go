@@ -1,3 +1,5 @@
+//go:build cgo && (linux || darwin) && !r2api
+
 // radare - LGPL - Copyright 2017 - pancake
 
 package r2pipe
@@ -6,6 +8,9 @@ package r2pipe
 // #include <stdio.h>
 // #include <dlfcn.h>
 // #include <stdlib.h>
+// #ifndef RTLD_NOW
+// #define RTLD_NOW 2
+// #endif
 // void *gor_core_new(void *f) {
 // 	void *(*rcn)();
 // 	rcn = (void *(*)())f;
@@ -26,23 +31,22 @@ package r2pipe
 import "C"
 
 import (
-	"errors"
 	"fmt"
 	"runtime"
 	"unsafe"
 )
 
+// Ptr is an alias for unsafe.Pointer for convenience.
 type Ptr = unsafe.Pointer
 
-// *struct{}
-
 var (
-	lib            Ptr = nil
-	r_core_new     func() Ptr
-	r_core_free    func(Ptr)
-	r_core_cmd_str func(Ptr, string) string
+	lib         Ptr
+	rCoreNew    func() Ptr
+	rCoreFree   func(Ptr)
+	rCoreCmdStr func(Ptr, string) string
 )
 
+// DL represents a dynamically loaded library.
 type DL struct {
 	handle unsafe.Pointer
 	name   string
@@ -60,39 +64,42 @@ func dlOpen(path string) (*DL, error) {
 	}
 	cpath := C.CString(path)
 	if cpath == nil {
-		return nil, errors.New("Failed to get cpath")
+		return nil, fmt.Errorf("failed to allocate C string for path")
 	}
-	// r2pipe only uses flag 0
-	ret.handle = C.dlopen(cpath, 0)
+	defer C.free(unsafe.Pointer(cpath))
+
+	// Use RTLD_NOW for immediate symbol resolution
+	ret.handle = C.dlopen(cpath, C.RTLD_NOW)
 	ret.name = path
-	C.free(unsafe.Pointer(cpath))
 	if ret.handle == nil {
-		return nil, errors.New(fmt.Sprintf("Failed to open %s", path))
+		errStr := C.GoString(C.dlerror())
+		return nil, fmt.Errorf("failed to open %s: %s", path, errStr)
 	}
 	return &ret, nil
 }
 
 func dlSym(dl *DL, name string) (unsafe.Pointer, error) {
-	err := fmt.Errorf("Failed to load '%s' from '%s'", name, dl.name)
 	cname := C.CString(name)
 	if cname == nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to allocate C string for symbol name")
 	}
+	defer C.free(unsafe.Pointer(cname))
+
 	handle := C.dlsym(dl.handle, cname)
-	C.free(unsafe.Pointer(cname))
 	if handle == nil {
-		return nil, err
+		errStr := C.GoString(C.dlerror())
+		return nil, fmt.Errorf("failed to load '%s' from '%s': %s", name, dl.name, errStr)
 	}
 	return handle, nil
 }
 
+// NativeLoad loads the radare2 native library dynamically.
 func NativeLoad() error {
 	if lib != nil {
 		return nil
 	}
-	var err error
-	var dl *DL
-	dl, err = dlOpen("libr_core")
+
+	dl, err := dlOpen("libr_core")
 	if err != nil {
 		return err
 	}
@@ -102,16 +109,15 @@ func NativeLoad() error {
 	if err != nil {
 		return err
 	}
-	r_core_new = func() Ptr {
-		a := (Ptr)(C.gor_core_new(handle1))
-		return a
+	rCoreNew = func() Ptr {
+		return Ptr(C.gor_core_new(handle1))
 	}
 
 	handle2, err := dlSym(dl, "r_core_free")
 	if err != nil {
 		return err
 	}
-	r_core_free = func(p Ptr) {
+	rCoreFree = func(p Ptr) {
 		C.gor_core_free(handle2, unsafe.Pointer(p))
 	}
 
@@ -119,10 +125,10 @@ func NativeLoad() error {
 	if err != nil {
 		return err
 	}
-	r_core_cmd_str = func(p Ptr, s string) string {
+	rCoreCmdStr = func(p Ptr, s string) string {
 		a := C.CString(s)
+		defer C.free(unsafe.Pointer(a))
 		b := C.gor_core_cmd_str(handle3, unsafe.Pointer(p), a)
-		C.free(unsafe.Pointer(a))
 		goRes := C.GoString(b)
 		C.free(unsafe.Pointer(b))
 		return goRes
@@ -130,22 +136,26 @@ func NativeLoad() error {
 	return nil
 }
 
+// NativeCmd executes a radare2 command using the native library.
 func (r2p *Pipe) NativeCmd(cmd string) (string, error) {
-	res := r_core_cmd_str(r2p.Core, cmd)
+	res := rCoreCmdStr(r2p.Core, cmd)
 	return res, nil
 }
 
+// NativeClose closes the native radare2 core instance.
 func (r2p *Pipe) NativeClose() error {
-	r_core_free(r2p.Core)
+	rCoreFree(r2p.Core)
 	r2p.Core = nil
 	return nil
 }
 
+// NewNativePipe creates a new Pipe using dynamic library loading.
+// This loads libr_core at runtime without requiring compile-time linking.
 func NewNativePipe(file string) (*Pipe, error) {
 	if err := NativeLoad(); err != nil {
 		return nil, err
 	}
-	r2 := r_core_new()
+	r2 := rCoreNew()
 	r2p := &Pipe{
 		File: file,
 		Core: r2,
@@ -157,7 +167,7 @@ func NewNativePipe(file string) (*Pipe, error) {
 		},
 	}
 	if file != "" {
-		r2p.NativeCmd("o " + file)
+		_, _ = r2p.NativeCmd("o " + file)
 	}
 	return r2p, nil
 }

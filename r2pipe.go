@@ -45,7 +45,7 @@ import (
 	"unsafe"
 )
 
-// A Pipe represents a communication interface with r2 that will be used to
+// Pipe represents a communication interface with r2 that will be used to
 // execute commands and obtain their results.
 type Pipe struct {
 	File   string
@@ -58,11 +58,14 @@ type Pipe struct {
 	close  CloseDelegate
 }
 
-type (
-	CmdDelegate   func(*Pipe, string) (string, error)
-	CloseDelegate func(*Pipe) error
-	EventDelegate func(*Pipe, string, interface{}, string) bool
-)
+// CmdDelegate is a function type for executing commands.
+type CmdDelegate func(*Pipe, string) (string, error)
+
+// CloseDelegate is a function type for closing the pipe.
+type CloseDelegate func(*Pipe) error
+
+// EventDelegate is a function type for handling events.
+type EventDelegate func(*Pipe, string, any, string) bool
 
 // NewPipe returns a new r2 pipe and initializes an r2 core that will try to
 // load the provided file or URI. If file is an empty string, the env vars
@@ -72,7 +75,6 @@ func NewPipe(file string) (*Pipe, error) {
 	if file == "" {
 		return newPipeFd()
 	}
-
 	return newPipeCmd(file)
 }
 
@@ -86,44 +88,57 @@ func newPipeFd() (*Pipe, error) {
 
 	r2pipeInFd, err := strconv.Atoi(r2pipeIn)
 	if err != nil {
-		return nil, fmt.Errorf("failed to convert IN into file descriptor")
+		return nil, fmt.Errorf("failed to convert IN into file descriptor: %w", err)
 	}
 
 	r2pipeOutFd, err := strconv.Atoi(r2pipeOut)
 	if err != nil {
-		return nil, fmt.Errorf("failed to convert OUT into file descriptor")
+		return nil, fmt.Errorf("failed to convert OUT into file descriptor: %w", err)
 	}
 
 	stdout := os.NewFile(uintptr(r2pipeInFd), "R2PIPE_IN")
 	stdin := os.NewFile(uintptr(r2pipeOutFd), "R2PIPE_OUT")
 
 	r2p := &Pipe{
-		File:   "",
-		r2cmd:  nil,
 		stdin:  stdin,
 		stdout: stdout,
-		Core:   nil,
 	}
 
 	return r2p, nil
 }
 
 func newPipeCmd(file string) (*Pipe, error) {
+	r2p := &Pipe{
+		File:  file,
+		r2cmd: exec.Command("radare2", "-q0", file),
+	}
 
-	r2p := &Pipe{File: file, r2cmd: exec.Command("radare2", "-q0", file)}
 	var err error
 	r2p.stdin, err = r2p.r2cmd.StdinPipe()
-	if err == nil {
-		r2p.stdout, err = r2p.r2cmd.StdoutPipe()
-		if err == nil {
-			r2p.stderr, err = r2p.r2cmd.StderrPipe()
-		}
-		if err = r2p.r2cmd.Start(); err == nil {
-			// Read the initial data
-			_, err = bufio.NewReader(r2p.stdout).ReadString('\x00')
-		}
+	if err != nil {
+		return nil, fmt.Errorf("failed to create stdin pipe: %w", err)
 	}
-	return r2p, err
+
+	r2p.stdout, err = r2p.r2cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create stdout pipe: %w", err)
+	}
+
+	r2p.stderr, err = r2p.r2cmd.StderrPipe()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create stderr pipe: %w", err)
+	}
+
+	if err = r2p.r2cmd.Start(); err != nil {
+		return nil, fmt.Errorf("failed to start radare2: %w", err)
+	}
+
+	// Read the initial data
+	if _, err = bufio.NewReader(r2p.stdout).ReadString('\x00'); err != nil {
+		return nil, fmt.Errorf("failed to read initial data: %w", err)
+	}
+
+	return r2p, nil
 }
 
 // Write implements the standard Write interface: it writes data to the r2
@@ -138,31 +153,34 @@ func (r2p *Pipe) Read(p []byte) (n int, err error) {
 	return r2p.stdout.Read(p)
 }
 
+// ReadErr reads from the stderr pipe.
 func (r2p *Pipe) ReadErr(p []byte) (n int, err error) {
 	return r2p.stderr.Read(p)
 }
 
-func (r2p *Pipe) On(evname string, p interface{}, cb EventDelegate) error {
+// On registers an event callback for stderr messages.
+func (r2p *Pipe) On(evname string, p any, cb EventDelegate) error {
 	path, err := r2p.Cmd("===stderr")
 	if err != nil {
 		return err
 	}
 	f, err := os.OpenFile(path, os.O_RDONLY, 0600)
-
 	if err != nil {
 		return err
 	}
 	go func() {
+		defer f.Close()
 		var buf bytes.Buffer
 		for {
-			io.Copy(&buf, f)
+			if _, err := io.Copy(&buf, f); err != nil {
+				break
+			}
 			if buf.Len() > 0 {
 				if !cb(r2p, evname, p, buf.String()) {
 					break
 				}
 			}
 		}
-		f.Close()
 	}()
 	return nil
 }
@@ -173,7 +191,6 @@ func (r2p *Pipe) Cmd(cmd string) (string, error) {
 		if r2p.cmd != nil {
 			return r2p.cmd(r2p, cmd)
 		}
-
 		return "", nil
 	}
 
@@ -185,42 +202,42 @@ func (r2p *Pipe) Cmd(cmd string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimRight(buf, "\n\x00"), err
+	return strings.TrimRight(buf, "\n\x00"), nil
 }
 
 // Cmdf is like Cmd but formats the command.
-func (r2p *Pipe) Cmdf(f string, args ...interface{}) (string, error) {
+func (r2p *Pipe) Cmdf(f string, args ...any) (string, error) {
 	return r2p.Cmd(fmt.Sprintf(f, args...))
 }
 
 // Cmdj acts like Cmd but interprets the output of the command as json. It
 // returns the parsed json keys and values.
-func (r2p *Pipe) Cmdj(cmd string) (out interface{}, err error) {
+func (r2p *Pipe) Cmdj(cmd string) (out any, err error) {
 	rstr, err := r2p.Cmd(cmd)
-	if err == nil {
-		err = json.Unmarshal([]byte(rstr), out)
+	if err != nil {
+		return nil, err
 	}
+	err = json.Unmarshal([]byte(rstr), &out)
 	return out, err
 }
 
-// CmdjStruct acts like Cmdjs but it will fill the interface/struct with the wanted values. It
-// returns the command execution error.
-func (r2p *Pipe) CmdjStruct(cmd string, out interface{}) (err error) {
+// CmdjStruct acts like Cmdj but it will fill the provided struct with the wanted values.
+// It returns the command execution error.
+func (r2p *Pipe) CmdjStruct(cmd string, out any) error {
 	rstr, err := r2p.Cmd(cmd)
-
-	if err == nil {
-		err = json.Unmarshal([]byte(rstr), out)
+	if err != nil {
+		return err
 	}
-	return err
+	return json.Unmarshal([]byte(rstr), out)
 }
 
 // Cmdjf is like Cmdj but formats the command.
-func (r2p *Pipe) Cmdjf(f string, args ...interface{}) (interface{}, error) {
+func (r2p *Pipe) Cmdjf(f string, args ...any) (any, error) {
 	return r2p.Cmdj(fmt.Sprintf(f, args...))
 }
 
-// CmdjfStruct is like Cmdj, but besides format the command it will already fill the interface sent.
-func (r2p *Pipe) CmdjfStruct(f string, out interface{}, args ...interface{}) error {
+// CmdjfStruct is like CmdjStruct, but also formats the command.
+func (r2p *Pipe) CmdjfStruct(f string, out any, args ...any) error {
 	return r2p.CmdjStruct(fmt.Sprintf(f, args...), out)
 }
 

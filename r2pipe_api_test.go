@@ -1,3 +1,5 @@
+//go:build cgo && r2api
+
 // radare - LGPL - Copyright 2017 - pancake
 
 package r2pipe
@@ -6,7 +8,6 @@ import "testing"
 
 func TestApiCmd(t *testing.T) {
 	r2p, err := NewApiPipe("/bin/ls")
-	// r2p, err := NewPipe("/bin/ls")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -15,5 +16,5 @@ func TestApiCmd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	print(version + "\n")
+	t.Log(version)
 }

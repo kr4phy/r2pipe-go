@@ -1,14 +1,16 @@
+//go:build cgo && (linux || darwin) && !r2api
+
 // radare - LGPL - Copyright 2017-2021 - pancake
 
 package r2pipe
 
-import "testing"
-import "fmt"
+import (
+	"testing"
+)
 
 func TestNativeCmd(t *testing.T) {
-	fmt.Println("[*] Testing r2 native api pipe")
+	t.Log("[*] Testing r2 native api pipe")
 	r2p, err := NewNativePipe("/bin/ls")
-	// r2p, err := NewPipe("/bin/ls")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -17,5 +19,5 @@ func TestNativeCmd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	print(version + "\n")
+	t.Log(version)
 }

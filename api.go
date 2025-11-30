@@ -1,3 +1,5 @@
+//go:build cgo && r2api
+
 // radare - LGPL - Copyright 2021 - pancake
 
 package r2pipe
@@ -11,13 +13,13 @@ package r2pipe
 // extern void r_core_free(void *);
 // extern void *r_core_new(void);
 // extern char *r_core_cmd_str(void*, const char *);
-//
 import "C"
 
 import (
 	"unsafe"
 )
 
+// ApiCmd executes a radare2 command using the C API and returns the result.
 func (r2p *Pipe) ApiCmd(cmd string) (string, error) {
 	ccmd := C.CString(cmd)
 	defer C.free(unsafe.Pointer(ccmd))
@@ -27,12 +29,15 @@ func (r2p *Pipe) ApiCmd(cmd string) (string, error) {
 	return goRes, nil
 }
 
+// ApiClose closes the radare2 core instance.
 func (r2p *Pipe) ApiClose() error {
 	C.r_core_free(unsafe.Pointer(r2p.Core))
 	r2p.Core = nil
 	return nil
 }
 
+// NewApiPipe creates a new Pipe using the radare2 C API.
+// This requires radare2 development libraries to be installed.
 func NewApiPipe(file string) (*Pipe, error) {
 	r2 := C.r_core_new()
 	r2p := &Pipe{
@@ -46,7 +51,7 @@ func NewApiPipe(file string) (*Pipe, error) {
 		},
 	}
 	if file != "" {
-		r2p.ApiCmd("o " + file)
+		_, _ = r2p.ApiCmd("o " + file)
 	}
 	return r2p, nil
 }

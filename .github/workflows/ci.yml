@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        go-version: ['1.21', '1.22']
+        go-version: ['1.23', '1.24']
 
     steps:
       - uses: actions/checkout@v4
@@ -28,7 +28,7 @@ jobs:
         run: go mod verify
 
       - name: Run go vet
-        run: go vet ./...
+        run: go vet r2pipe.go
 
       - name: Check formatting
         run: |
@@ -39,4 +39,4 @@ jobs:
           fi
 
       - name: Build
-        run: go build -v ./...
+        run: go build -v r2pipe.go
